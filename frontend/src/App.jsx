@@ -1,4 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  getIncidents,
+  createIncident as createIncidentAPI,
+  updateIncidentStatus,
+  getResources,
+  getBridges,
+  updateBridgeStatus,
+  updateResourceQuantity,
+} from "./api";
 import {
   Activity,
   AlertTriangle,
@@ -72,11 +81,15 @@ function App() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const [search, setSearch] = useState("");
   const [incidents, setIncidents] = useState(initialIncidents);
+  const [loadingIncidents, setLoadingIncidents] = useState(true);
+const [apiError, setApiError] = useState("");
   const [shelterOccupancy, setShelterOccupancy] = useState(126);
   const [averageLoad, setAverageLoad] = useState(2);
   const [backupHours, setBackupHours] = useState(48);
   const [batteryCapacity, setBatteryCapacity] = useState(120);
   const [resourceValues, setResourceValues] = useState(initialResources);
+  const [loadingResources, setLoadingResources] = useState(true);
+  const [resourceError, setResourceError] = useState("");
   const [showIncidentForm, setShowIncidentForm] = useState(false);
   const [newIncident, setNewIncident] = useState({
     title: "",
@@ -84,6 +97,63 @@ function App() {
     priority: "High",
   });
   const [notice, setNotice] = useState("");
+  useEffect(() => {
+  async function loadIncidents() {
+    try {
+      setLoadingIncidents(true);
+      setApiError("");
+
+      const data = await getIncidents();
+
+      setIncidents(
+        data.items.map((item) => ({
+          ...item,
+          priority: item.severity,
+          time: new Date(item.created_at).toLocaleString(),
+          
+        }))
+      );
+    } catch (error) {
+      setApiError("Backend se incidents load nahi ho paaye.");
+      console.error(error);
+    } finally {
+      setLoadingIncidents(false);
+    }
+  }
+
+  loadIncidents();
+}, []);
+
+  useEffect(() => {
+    async function loadResources() {
+      try {
+        setLoadingResources(true);
+        setResourceError("");
+
+        const data = await getResources();
+        const colors = ["blue", "purple", "green", "yellow"];
+
+        setResourceValues(
+          data.items.map((item, index) => ({
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            stock: item.available,
+            total: item.total,
+            unit: item.unit,
+            color: colors[index % colors.length],
+          }))
+        );
+      } catch (error) {
+        console.error(error);
+        setResourceError("Resources backend se load nahi ho paaye.");
+      } finally {
+        setLoadingResources(false);
+      }
+    }
+
+    loadResources();
+  }, []);
 
   const requiredEnergy = averageLoad * backupHours;
   const batteryRuntime =
@@ -94,24 +164,24 @@ function App() {
     window.setTimeout(() => setNotice(""), 3000);
   };
 
-  const addIncident = (event) => {
-    event.preventDefault();
+  const addIncident = async (event) => {
+  event.preventDefault();
 
-    if (!newIncident.title.trim() || !newIncident.location.trim()) {
-      notify("Please enter incident details.");
-      return;
-    }
+  if (!newIncident.title.trim() || !newIncident.location.trim()) {
+    notify("Please enter incident details.");
+    return;
+  }
 
-    setIncidents((previous) => [
-      {
-        id: `INC-${String(Date.now()).slice(-4)}`,
-        title: newIncident.title,
-        location: newIncident.location,
-        priority: newIncident.priority,
-        time: "Just now",
-      },
-      ...previous,
-    ]);
+  try {
+    const created = await createIncidentAPI(newIncident);
+
+    const incident = {
+      ...created,
+      priority: created.severity,
+      time: new Date(created.created_at).toLocaleString(),
+    };
+
+    setIncidents((previous) => [incident, ...previous]);
 
     setNewIncident({
       title: "",
@@ -121,27 +191,70 @@ function App() {
 
     setShowIncidentForm(false);
     setActivePage("Smart Rescue");
-    notify("Incident added successfully.");
-  };
+    notify("Incident saved to backend successfully.");
+  } catch (error) {
+    console.error(error);
+    notify("Incident create nahi hua. Backend check karo.");
+  }
+};
 
-  const updateIncident = (id) => {
+  const updateIncident = async (id) => {
+  try {
+    await updateIncidentStatus(id, "Resolved");
+
     setIncidents((previous) =>
       previous.filter((incident) => incident.id !== id)
     );
-    notify("Incident removed from the active list.");
-  };
 
-  const updateResource = (index, value) => {
-    setResourceValues((previous) =>
-      previous.map((resource, i) =>
-        i === index
-          ? {
-              ...resource,
-              stock: Math.max(0, Math.min(100, Number(value) || 0)),
-            }
-          : resource
-      )
-    );
+    notify("Incident resolved successfully.");
+  } catch (error) {
+    console.error(error);
+    notify("Could not resolve incident. Please try again.");
+  }
+};
+
+  const updateResource = async (index, value) => {
+    const resource = resourceValues[index];
+    const newStock = Number(value);
+
+    if (
+      value === "" ||
+      !Number.isInteger(newStock) ||
+      newStock < 0 ||
+      newStock > resource.total
+    ) {
+      setResourceError(`Quantity 0 se ${resource.total} ke beech honi chahiye.`);
+      return false;
+    }
+
+    const delta = newStock - resource.stock;
+
+    if (delta === 0) {
+      setResourceError("");
+      return true;
+    }
+
+    try {
+      setResourceError("");
+      const result = await updateResourceQuantity(resource.id, delta);
+      const updatedStock =
+        result?.available ??
+        result?.item?.available ??
+        result?.resource?.available ??
+        newStock;
+
+      setResourceValues((previous) =>
+        previous.map((item, i) =>
+          i === index ? { ...item, stock: updatedStock } : item
+        )
+      );
+      notify(`${resource.name} inventory updated successfully.`);
+      return true;
+    } catch (error) {
+      console.error(error);
+      setResourceError("Backend inventory update nahi ho paya. Please try again.");
+      return false;
+    }
   };
 
   const filteredIncidents = incidents.filter((incident) =>
@@ -285,6 +398,13 @@ function App() {
         </header>
 
         <div className="page-container">
+          {loadingIncidents && (
+  <p role="status">Loading incidents from backend...</p>
+)}
+
+{apiError && (
+  <p role="alert">{apiError}</p>
+)}
           <div className="page-heading">
             <div>
               <div className="eyebrow">
@@ -328,6 +448,8 @@ function App() {
               batteryRuntime={batteryRuntime}
               resources={resourceValues}
               updateResource={updateResource}
+              loadingResources={loadingResources}
+              resourceError={resourceError}
               onNavigate={setActivePage}
               notify={notify}
               search={search}
@@ -370,6 +492,8 @@ function App() {
             <ResourcesPage
               resources={resourceValues}
               updateResource={updateResource}
+              loading={loadingResources}
+              error={resourceError}
             />
           )}
 
@@ -549,6 +673,8 @@ function Overview({
   batteryRuntime,
   resources,
   updateResource,
+  loadingResources,
+  resourceError,
   onNavigate,
   notify,
   search,
@@ -825,30 +951,31 @@ function Overview({
       <section className="panel resources-panel">
         <SectionHeading
           title="Essential resource levels"
-          subtitle="Editable demo inventory — not live field data"
+          subtitle={loadingResources ? "Loading backend inventory..." : "Inventory loaded from backend"}
           action="Manage resources"
           onAction={() => onNavigate("Resources")}
         />
 
+        {resourceError && <p role="alert">{resourceError}</p>}
         <div className="resource-grid">
           {resources.map((resource, index) => (
             <div className="resource-item" key={resource.name}>
               <div className="resource-heading">
                 <span>{resource.name}</span>
-                <strong>{resource.stock}{resource.unit}</strong>
+                <strong>{resource.stock} / {resource.total} {resource.unit}</strong>
               </div>
               <div className="progress-track resource-track">
                 <div
                   className={`progress-fill ${resource.color}-fill`}
-                  style={{ width: `${resource.stock}%` }}
+                  style={{ width: `${resource.total > 0 ? (resource.stock / resource.total) * 100 : 0}%` }}
                 />
               </div>
               <span className="resource-caption">
-                {resource.stock < 30
+                {resource.total > 0 && resource.stock / resource.total < 0.3
                   ? "Low stock — replenishment needed"
-                  : "Demo stock level"}
+                  : "Backend inventory"}
               </span>
-              {resource.stock < 30 && (
+              {resource.total > 0 && resource.stock / resource.total < 0.3 && (
                 <button
                   className="text-button"
                   onClick={() => notify(`Replenishment needed: ${resource.name}`)}
@@ -1260,25 +1387,74 @@ function EnergyPage({
 }
 
 function BridgePage({ notify }) {
-  const [components, setComponents] = useState([
-    { id: 1, name: "Modular truss sections", count: 12, status: "Pending" },
-    { id: 2, name: "Decking panels", count: 18, status: "Pending" },
-    { id: 3, name: "Connection assemblies", count: 24, status: "Pending" },
-    { id: 4, name: "Abutment inspection", count: 2, status: "Pending" },
-  ]);
+  const [bridges, setBridges] = useState([]);
+  const [loadingBridges, setLoadingBridges] = useState(true);
+  const [bridgeError, setBridgeError] = useState("");
+  const [selectedBridge, setSelectedBridge] = useState(null);
+  const [draftStatus, setDraftStatus] = useState("");
+  const [savingStatus, setSavingStatus] = useState(false);
 
-  const completed = components.filter((item) => item.status === "Reviewed").length;
+  const statusOptions = ["Inspection pending", "Deployment ready", "In transit"];
+
+  async function loadBridges() {
+    try {
+      setLoadingBridges(true);
+      setBridgeError("");
+      const data = await getBridges();
+      setBridges(Array.isArray(data.items) ? data.items : []);
+    } catch (error) {
+      console.error(error);
+      setBridgeError("Bridges backend se load nahi ho paaye.");
+    } finally {
+      setLoadingBridges(false);
+    }
+  }
+
+  useEffect(() => {
+    loadBridges();
+  }, []);
+
+  const inspectedCount = bridges.filter((bridge) =>
+    String(bridge.status || "").toLowerCase().includes("review") ||
+    String(bridge.status || "").toLowerCase().includes("inspect")
+  ).length;
+
+  function openStatusEditor(bridge) {
+    setSelectedBridge(bridge);
+    setDraftStatus(bridge.status || statusOptions[0]);
+  }
+
+  async function saveBridgeStatus(event) {
+    event.preventDefault();
+    if (!selectedBridge || !draftStatus) return;
+
+    try {
+      setSavingStatus(true);
+      const updatedBridge = await updateBridgeStatus(selectedBridge.id, draftStatus);
+      setBridges((current) =>
+        current.map((bridge) =>
+          bridge.id === updatedBridge.id ? updatedBridge : bridge
+        )
+      );
+      setSelectedBridge(null);
+      notify(`Bridge ${updatedBridge.id} status updated to ${updatedBridge.status}.`);
+    } catch (error) {
+      console.error(error);
+      notify(error.message || "Bridge status update failed.");
+    } finally {
+      setSavingStatus(false);
+    }
+  }
 
   return (
     <>
       <section className="metrics-grid">
         <MetricCard
-          title="Required span"
-          value="45"
-          unit=" m"
+          title="Bridge records"
+          value={bridges.length}
           icon={Route}
           tone="blue"
-          caption="No central piers permitted"
+          caption="Loaded from FastAPI backend"
         />
         <MetricCard
           title="Vehicle load target"
@@ -1286,19 +1462,19 @@ function BridgePage({ notify }) {
           unit=" tonnes"
           icon={Building2}
           tone="yellow"
-          caption="Emergency response vehicles"
+          caption="Emergency response planning target"
         />
         <MetricCard
           title="Inspection records"
-          value={completed}
-          unit={` / ${components.length}`}
+          value={inspectedCount}
+          unit={` / ${bridges.length}`}
           icon={CheckCircle2}
           tone="green"
-          caption="Administrative review status"
+          caption="Based on backend status values"
         />
         <MetricCard
           title="Deployment status"
-          value={completed === components.length ? "Reviewed" : "Pending"}
+          value={bridges.length > 0 && inspectedCount === bridges.length ? "Reviewed" : "Pending"}
           icon={Activity}
           tone="purple"
           caption="Not a structural safety certification"
@@ -1307,65 +1483,152 @@ function BridgePage({ notify }) {
 
       <section className="panel page-panel">
         <SectionHeading
-          title="Bridge component tracking"
-          subtitle="Demo inventory and administrative inspection records"
+          title="Bridge tracking"
+          subtitle={loadingBridges ? "Loading bridge records from backend..." : "Bridge records returned by the backend"}
         />
 
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Component</th>
-                <th>Planned quantity</th>
-                <th>Inspection status</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {components.map((component) => (
-                <tr key={component.id}>
-                  <td><strong>{component.name}</strong></td>
-                  <td>{component.count}</td>
-                  <td>
-                    <span className={`priority ${component.status === "Reviewed" ? "priority-low" : "priority-medium"}`}>
-                      {component.status}
-                    </span>
-                  </td>
-                  <td>
-                    <button
-                      className="text-button"
-                      onClick={() => {
-                        setComponents((previous) =>
-                          previous.map((item) =>
-                            item.id === component.id
-                              ? {
-                                  ...item,
-                                  status: item.status === "Reviewed" ? "Pending" : "Reviewed",
-                                }
-                              : item
-                          )
-                        );
-                        notify("Administrative review status updated.");
-                      }}
-                    >
-                      {component.status === "Reviewed" ? "Reopen" : "Mark reviewed"}
-                    </button>
-                  </td>
+        {loadingBridges && <p role="status">Loading bridges from backend...</p>}
+        {bridgeError && <p role="alert">{bridgeError}</p>}
+
+        {!loadingBridges && !bridgeError && bridges.length === 0 && (
+          <div className="empty-state">Backend ne abhi koi bridge record return nahi kiya.</div>
+        )}
+
+        {!loadingBridges && !bridgeError && bridges.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bridge</th>
+                  <th>Zone</th>
+                  <th>Span</th>
+                  <th>Load class</th>
+                  <th>Backend status</th>
+                  <th>Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {bridges.map((bridge) => (
+                  <tr key={bridge.id}>
+                    <td>
+                      <strong>{bridge.name}</strong>
+                      <span className="table-subtitle">{bridge.id}</span>
+                    </td>
+                    <td>{bridge.zone || "—"}</td>
+                    <td>{bridge.span_m != null ? `${bridge.span_m} m` : "—"}</td>
+                    <td>{bridge.load_class_tonnes != null ? `${bridge.load_class_tonnes} tonnes` : "—"}</td>
+                    <td>
+                      <span className={`priority ${String(bridge.status || "Pending").toLowerCase().includes("open") ? "priority-low" : "priority-medium"}`}>
+                        {bridge.status || "Pending"}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        className="text-button"
+                        onClick={() => openStatusEditor(bridge)}
+                      >
+                        View status
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
+
+      {selectedBridge && (
+        <div
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !savingStatus) {
+              setSelectedBridge(null);
+            }
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(2, 6, 18, 0.76)",
+            display: "grid",
+            placeItems: "center",
+            padding: "20px",
+          }}
+        >
+          <section
+            className="panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bridge-status-title"
+            style={{ width: "min(100%, 480px)", padding: "24px" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", alignItems: "flex-start" }}>
+              <div>
+                <h2 id="bridge-status-title" style={{ marginTop: 0 }}>Bridge status</h2>
+                <p>{selectedBridge.name} · {selectedBridge.id}</p>
+              </div>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setSelectedBridge(null)}
+                disabled={savingStatus}
+                aria-label="Close bridge status dialog"
+              >
+                Close
+              </button>
+            </div>
+
+            <p>Current status: <strong>{selectedBridge.status}</strong></p>
+
+            <form onSubmit={saveBridgeStatus}>
+              <label htmlFor="bridge-status-select" style={{ display: "block", marginBottom: "8px" }}>
+                Update status
+              </label>
+              <select
+                id="bridge-status-select"
+                value={draftStatus}
+                onChange={(event) => setDraftStatus(event.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "12px",
+                  borderRadius: "10px",
+                  marginBottom: "18px",
+                  color: "inherit",
+                  background: "#111b2b",
+                  border: "1px solid #334155",
+                }}
+              >
+                {statusOptions.map((status) => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+              <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setSelectedBridge(null)}
+                  disabled={savingStatus}
+                >
+                  Cancel
+                </button>
+                <button type="submit" disabled={savingStatus}>
+                  {savingStatus ? "Saving..." : "Update Status"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
 
       <section className="panel info-banner">
         <AlertTriangle size={22} />
         <div>
           <strong>Engineering approval required</strong>
           <p>
-            Component records do not verify bridge strength, foundation
-            stability or suitability for a 15-tonne vehicle. Deployment
-            requires qualified structural engineering analysis and approval.
+            Backend bridge records are for tracking only. They do not verify bridge strength,
+            foundation stability or suitability for a 15-tonne vehicle. Deployment requires
+            qualified structural engineering analysis and approval.
           </p>
         </div>
       </section>
@@ -1373,7 +1636,26 @@ function BridgePage({ notify }) {
   );
 }
 
-function ResourcesPage({ resources, updateResource }) {
+function ResourcesPage({ resources, updateResource, loading, error }) {
+  const [draftValues, setDraftValues] = useState({});
+
+  useEffect(() => {
+    setDraftValues(
+      Object.fromEntries(resources.map((resource) => [resource.id, String(resource.stock)]))
+    );
+  }, [resources]);
+
+  const saveResource = async (index, resource) => {
+    const draft = draftValues[resource.id] ?? String(resource.stock);
+    const saved = await updateResource(index, draft);
+    if (!saved) {
+      setDraftValues((previous) => ({
+        ...previous,
+        [resource.id]: String(resource.stock),
+      }));
+    }
+  };
+
   return (
     <>
       <section className="metrics-grid">
@@ -1382,11 +1664,11 @@ function ResourcesPage({ resources, updateResource }) {
           value={resources.length}
           icon={Boxes}
           tone="blue"
-          caption="Editable demonstration inventory"
+          caption="Loaded from backend"
         />
         <MetricCard
           title="Low stock alerts"
-          value={resources.filter((item) => item.stock < 30).length}
+          value={resources.filter((item) => item.total > 0 && item.stock / item.total < 0.3).length}
           icon={AlertTriangle}
           tone="red"
           caption="Categories below 30%"
@@ -1394,7 +1676,7 @@ function ResourcesPage({ resources, updateResource }) {
         <MetricCard
           title="Average stock"
           value={`${Math.round(
-            resources.reduce((sum, item) => sum + item.stock, 0) /
+            resources.reduce((sum, item) => sum + (item.total > 0 ? item.stock / item.total * 100 : 0), 0) /
               Math.max(1, resources.length)
           )}%`}
           icon={Activity}
@@ -1403,17 +1685,19 @@ function ResourcesPage({ resources, updateResource }) {
         />
         <MetricCard
           title="Data source"
-          value="Demo"
+          value="API"
           icon={Radio}
           tone="purple"
-          caption="Not connected to field inventory"
+          caption="FastAPI inventory source"
         />
       </section>
 
       <section className="panel page-panel">
+        {loading && <p role="status">Loading resources from backend...</p>}
+        {error && <p role="alert">{error}</p>}
         <SectionHeading
           title="Resource inventory"
-          subtitle="Adjust sample stock levels to demonstrate shortage alerts"
+          subtitle="Available quantities returned by the backend"
         />
 
         <div className="resource-management-list">
@@ -1425,23 +1709,34 @@ function ResourcesPage({ resources, updateResource }) {
               <div className="resource-management-info">
                 <strong>{resource.name}</strong>
                 <span>
-                  {resource.stock < 30 ? "Replenishment required" : "Sample stock level"}
+                  {resource.total > 0 && resource.stock / resource.total < 0.3 ? "Replenishment required" : "Backend inventory"}
                 </span>
                 <div className="progress-track resource-track">
                   <div
                     className={`progress-fill ${resource.color}-fill`}
-                    style={{ width: `${resource.stock}%` }}
+                    style={{ width: `${resource.total > 0 ? (resource.stock / resource.total) * 100 : 0}%` }}
                   />
                 </div>
               </div>
               <label className="stock-input">
-                <span>Stock %</span>
+                <span>Available ({resource.unit})</span>
                 <input
                   type="number"
                   min="0"
-                  max="100"
-                  value={resource.stock}
-                  onChange={(event) => updateResource(index, event.target.value)}
+                  max={resource.total}
+                  value={draftValues[resource.id] ?? String(resource.stock)}
+                  onChange={(event) =>
+                    setDraftValues((previous) => ({
+                      ...previous,
+                      [resource.id]: event.target.value,
+                    }))
+                  }
+                  onBlur={() => saveResource(index, resource)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.currentTarget.blur();
+                    }
+                  }}
                 />
               </label>
             </div>
